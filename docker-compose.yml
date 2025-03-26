@@ -24,3 +24,14 @@ services:
     command: ["-c", "50000", "-n", "1000000", "-m", "GET", "http://sse-server:8080/sse"]
     sysctls:
       - net.ipv4.ip_local_port_range=1024 65535
+    ulimits:
+      nofile:
+        soft: 100000
+        hard: 100000
+    privileged: true  # Required for high connection count
+    network_mode: "host"  # Bypass Docker networking limitations
+
+networks:
+  default:
+    driver: bridge
+    name: sse-network
