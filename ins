@@ -1,3 +1,81 @@
+4. Running the Test
+bash
+Copy
+# Build and start
+docker-compose build
+docker-compose up -d
+
+# Monitor connections (new terminal)
+watch -n1 "curl -s http://localhost:8080/metrics"
+
+# Check server logs
+docker-compose logs -f sse-server
+5. Key Simplifications:
+Removed Redis:
+
+Connection tracking now uses in-memory Interlocked counter
+
+Suitable for single-instance POC
+
+Reduces container complexity
+
+Optimized Kestrel Configuration:
+
+csharp
+Copy
+listenOptions.UseLinuxSocketTransport();
+Uses Linux-specific optimized transport layer
+
+Simplified Metrics:
+
+Direct endpoint returns active connection count
+
+No external dependencies
+
+6. Verification Commands
+bash
+Copy
+# Check active connections in container
+docker exec -it $(docker ps -q -f name=sse-server) \
+  curl -s http://localhost:8080/metrics
+
+# Check OS connections
+docker exec -it $(docker ps -q -f name=sse-server) \
+  netstat -an | grep ESTABLISHED | wc -l
+7. Expected Resource Usage (4GB RAM/2 CPU Container)
+Metric	10k Connections	50k Connections
+Memory Usage	~80MB	~300MB
+CPU Usage	5-10%	20-30%
+File Handles	~10k	~50k
+8. Important Notes:
+Connection Accuracy:
+
+In-memory counter will reset on app restart
+
+For POC purposes, this is acceptable
+
+Use netstat for OS-level verification
+
+Load Test Adjustment:
+
+If seeing connection drops, add -timeout 20m to bombardier command
+
+yaml
+Copy
+command: ["-c", "50000", "-n", "1000000", "-timeout", "20m", "-m", "GET", "http://sse-server:8080/sse"]
+Scale Limits:
+
+To reach 50k, ensure Docker host has:
+
+bash
+Copy
+echo "fs.file-max = 1000000" | sudo tee -a /etc/sysctl.conf
+echo "* soft nofile 1000000" | sudo tee -a /etc/security/limits.conf
+echo "* hard nofile 1000000" | sudo tee -a /etc/security/limits.conf
+This simplified setup can handle 50k+ connections with proper host configuration while maintaining minimal complexity for POC validation.
+------------------
+
+
 5. Setup Commands
 bash
 Copy
