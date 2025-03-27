@@ -1,3 +1,29 @@
+version: '3.8'
+services:
+  sse-server:
+    build: ./sse-server
+    ports:
+      - "80:80"
+    # additional configuration for your C# SSE server
+
+  artillery:
+    image: node:16
+    working_dir: /app
+    command: >
+      sh -c "npm install -g artillery &&
+             echo 'config:
+               target: \"http://sse-server:80\"
+               phases:
+                 - duration: 300
+                   arrivalRate: 50
+             scenarios:
+               - flow:
+                   - get:
+                       url: \"/sse-endpoint\"' | artillery run -"
+    depends_on:
+      - sse-server
+
+_--------
 4. Running the Test
 bash
 Copy
