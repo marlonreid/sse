@@ -87,3 +87,11 @@ spec:
         org.apache.kafka.common.security.plain.PlainLoginModule required
         username="$ConnectionString"
         password="${env:EVENTHUBS_CONNECTION_STRING}";
+---
+
+kubectl create secret generic db-credentials -n debezium \
+  --from-literal=username=repl_user \
+  --from-literal=password=strongpassword
+
+kubectl create secret generic eventhubs-connection -n debezium \
+  --from-literal=connection-string='Endpoint=sb://your-eventhubs-namespace.servicebus.windows.net/;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=your-key'
