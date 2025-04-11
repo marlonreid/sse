@@ -1,9 +1,8 @@
-Properties props = new Properties();
-props.put("bootstrap.servers", "<namespace>.servicebus.windows.net:9093");
-props.put("security.protocol", "SASL_SSL");
-props.put("sasl.mechanism", "PLAIN");
-props.put("sasl.jaas.config", "org.apache.kafka.common.security.plain.PlainLoginModule required "
-        + "username=\"$ConnectionString\" "
-        + "password=\"<CONNECTION_STRING>\";");
-props.put("group.id", "<CONSUMER_GROUP>");
-props.put("auto.offset.reset", "earliest");
+-- As an admin user:
+CREATE USER debezium_user WITH REPLICATION LOGIN PASSWORD 'your_password';
+GRANT pg_create_publication TO debezium_user;
+GRANT USAGE ON SCHEMA public TO debezium_user;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO debezium_user;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO debezium_user;
+GRANT EXECUTE ON FUNCTION pg_create_logical_replication_slot(text, text, boolean) TO debezium_user;
+GRANT EXECUTE ON FUNCTION pg_drop_replication_slot(text) TO debezium_user;
