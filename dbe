@@ -6,3 +6,21 @@ GRANT SELECT ON ALL TABLES IN SCHEMA public TO debezium_user;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO debezium_user;
 GRANT EXECUTE ON FUNCTION pg_create_logical_replication_slot(text, text, boolean) TO debezium_user;
 GRANT EXECUTE ON FUNCTION pg_drop_replication_slot(text) TO debezium_user;
+
+
+-- Create user with replication privileges
+CREATE USER debezium_user WITH REPLICATION LOGIN PASSWORD 'your_password';
+
+-- Allow creation of publications for all tables
+GRANT pg_create_publication TO debezium_user;
+
+-- Grant access to existing tables
+GRANT USAGE ON SCHEMA public TO debezium_user;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO debezium_user;
+
+-- Grant access to future tables (optional but recommended)
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO debezium_user;
+
+-- Grant replication slot permissions
+GRANT EXECUTE ON FUNCTION pg_create_logical_replication_slot(text, text, boolean) TO debezium_user;
+GRANT EXECUTE ON FUNCTION pg_drop_replication_slot(name) TO debezium_user;  -- ✅ Corrected
