@@ -1,0 +1,9 @@
+helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
+helm repo update
+
+helm install opentelemetry-operator open-telemetry/opentelemetry-operator
+
+
+
+kubectl create configmap otel-jmx-agent \
+  --from-file=opentelemetry-javaagent.jar
