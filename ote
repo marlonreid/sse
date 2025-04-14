@@ -1,0 +1,80 @@
+apiVersion: v2
+name: otel-jmx-collector
+version: 0.1.0
+description: A Helm chart for deploying an OpenTelemetry Collector with JMX receiver for Debezium standalone server
+
+templates:
+  - deployment.yaml
+  - configmap.yaml
+  - service.yaml
+
+---
+# templates/deployment.yaml
+apiVersion: opentelemetry.io/v1alpha1
+kind: OpenTelemetryCollector
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    app: {{ .Release.Name }}
+spec:
+  mode: deployment
+  config: |
+    receivers:
+      jmx:
+        jar_path: /otel-jmx/opentelemetry-javaagent.jar
+        endpoint: {{ .Values.jmx.endpoint }}
+        target_system: jvm
+        collection_interval: 30s
+
+    exporters:
+      otlp:
+        endpoint: {{ .Values.otlp.endpoint }}
+        tls:
+          insecure: {{ .Values.otlp.insecure }}
+
+    service:
+      pipelines:
+        metrics:
+          receivers: [jmx]
+          exporters: [otlp]
+  volumeMounts:
+    - name: otel-jmx
+      mountPath: /otel-jmx
+  volumes:
+    - name: otel-jmx
+      configMap:
+        name: {{ .Release.Name }}-otel-jmx-agent
+
+---
+# templates/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-otel-jmx-agent
+data:
+  opentelemetry-javaagent.jar: |-
+    # Upload the contents of the actual JAR as a base64 encoded string or use a prebuilt image to mount it.
+    PLACEHOLDER_BINARY_DATA
+
+---
+# templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}
+spec:
+  selector:
+    app: {{ .Release.Name }}
+  ports:
+    - name: otlp
+      port: 4317
+      targetPort: 4317
+
+---
+# values.yaml
+jmx:
+  endpoint: debezium-standalone:9010
+
+otlp:
+  endpoint: <your-grafana-azure-endpoint>:4317
+  insecure: false
