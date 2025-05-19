@@ -1,50 +1,57 @@
-// inside your per‑document loop, after you have `root` and `model`...
-var invocations = root
-  .DescendantNodes()
-  .OfType<InvocationExpressionSyntax>();
-
-foreach (var invocation in invocations)
+static bool IsOptionsInterface(ITypeSymbol type)
 {
-    // We only care about member calls: foo.Bar(...)
-    if (invocation.Expression is MemberAccessExpressionSyntax memberAccess)
+    if (type == null) return false;
+
+    // Look at the type itself and all its interfaces:
+    var all = new[] { type }.Concat(type.AllInterfaces);
+
+    foreach (var t in all)
     {
-        // Get the type of the expression before the dot: e.g. 'this.Configuration' or '_configuration'
-        var receiverType = model.GetTypeInfo(memberAccess.Expression).Type;
-        if (receiverType == null)
-            continue;
-
-        // Does it *implement* IConfiguration?
-        var isConfiguration = receiverType.AllInterfaces
-            .Any(i => i.ToDisplayString() == "Microsoft.Extensions.Configuration.IConfiguration")
-          || receiverType.ToDisplayString() == "Microsoft.Extensions.Configuration.IConfiguration";
-
-        if (!isConfiguration)
-            continue;
-
-        // At this point, it's a call on an IConfiguration instance.
-        var methodSymbol = model.GetSymbolInfo(memberAccess).Symbol as IMethodSymbol;
-        var methodName = methodSymbol?.Name ?? memberAccess.Name.Identifier.Text;
-
-        // If it's an extension method (e.g. GetSection, Bind, GetValue, etc.), 
-        // the same logic applies because the *receiver* is still IConfiguration.
-
-        // Grab the first argument if you want the key/section name:
-        string keyArg = null;
-        if (invocation.ArgumentList.Arguments.Count > 0 &&
-            invocation.ArgumentList.Arguments[0].Expression is LiteralExpressionSyntax lit &&
-            lit.IsKind(SyntaxKind.StringLiteralExpression))
+        if (t is INamedTypeSymbol named
+            && named.IsGenericType
+            && (
+                named.ConstructedFrom.ToDisplayString() == "Microsoft.Extensions.Options.IOptions<TOptions>"
+             || named.ConstructedFrom.ToDisplayString() == "Microsoft.Extensions.Options.IOptionsMonitor<TOptions>"
+             || named.ConstructedFrom.ToDisplayString() == "Microsoft.Extensions.Options.IOptionsSnapshot<TOptions>"
+             || named.ConstructedFrom.ToDisplayString() == "Microsoft.Extensions.Options.IOptionsFactory<TOptions>"
+             || named.ConstructedFrom.ToDisplayString() == "Microsoft.Extensions.Options.IOptionsMonitorCache<TOptions>"
+            ))
         {
-            keyArg = lit.Token.ValueText;
+            return true;
         }
-
-        results.Add(new ConfigHit {
-            Project = project.Name,
-            File    = doc.FilePath,
-            Line    = invocation.GetLocation().GetLineSpan().StartLinePosition.Line + 1,
-            Type    = "IConfigurationCall",
-            Method  = methodName,
-            Key     = keyArg
-        });
     }
+    return false;
 }
 
+
+
+
+
+
+
+
+
+
+
+// in your per‑document loop, after you have `root` and `model`...
+var ctors = root.DescendantNodes()
+    .OfType<ConstructorDeclarationSyntax>();
+
+foreach (var ctor in ctors)
+{
+    foreach (var param in ctor.ParameterList.Parameters)
+    {
+        var paramType = model.GetTypeInfo(param.Type).Type;
+        if (IsOptionsInterface(paramType))
+        {
+            results.Add(new ConfigHit {
+                Project = project.Name,
+                File    = doc.FilePath,
+                Line    = param.GetLocation().GetLineSpan().StartLinePosition.Line + 1,
+                Type    = "OptionsInjection",
+                Method  = ctor.Identifier.Text,
+                Key     = paramType.ToDisplayString()
+            });
+        }
+    }
+}
