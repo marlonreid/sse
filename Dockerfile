@@ -55,3 +55,73 @@ foreach (var ctor in ctors)
         }
     }
 }
+
+
+
+
+
+var invocations = root
+    .DescendantNodes()
+    .OfType<InvocationExpressionSyntax>();
+
+foreach (var invocation in invocations)
+{
+    if (!(invocation.Expression is MemberAccessExpressionSyntax memberAccess))
+        continue;
+
+    var receiverType = model.GetTypeInfo(memberAccess.Expression).Type;
+    if (!IsOptionsInterface(receiverType))
+        continue;
+
+    // e.g. options.Value, monitor.CurrentValue, options.Get("MyNamed")
+    var methodName = memberAccess.Name.Identifier.Text;
+    string keyArg = null;
+    if (invocation.ArgumentList.Arguments.Count > 0
+        && invocation.ArgumentList.Arguments[0].Expression is LiteralExpressionSyntax lit
+        && lit.IsKind(SyntaxKind.StringLiteralExpression))
+    {
+        keyArg = lit.Token.ValueText;
+    }
+
+    results.Add(new ConfigHit {
+        Project = project.Name,
+        File    = doc.FilePath,
+        Line    = invocation.GetLocation().GetLineSpan().StartLinePosition.Line + 1,
+        Type    = "OptionsCall",
+        Method  = methodName,
+        Key     = keyArg
+    });
+}
+
+
+
+
+
+
+
+
+
+
+
+var memberAccesses = root.DescendantNodes()
+    .OfType<MemberAccessExpressionSyntax>();
+
+foreach (var ma in memberAccesses)
+{
+    var receiverType = model.GetTypeInfo(ma.Expression).Type;
+    if (!IsOptionsInterface(receiverType))
+        continue;
+
+    var prop = ma.Name.Identifier.Text;
+    if (prop == "Value" || prop == "CurrentValue")
+    {
+        results.Add(new ConfigHit {
+            Project = project.Name,
+            File    = doc.FilePath,
+            Line    = ma.GetLocation().GetLineSpan().StartLinePosition.Line + 1,
+            Type    = "OptionsProperty",
+            Method  = prop,
+            Key     = null
+        });
+    }
+}
