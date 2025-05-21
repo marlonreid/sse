@@ -1,212 +1,104 @@
-using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
-using System.Threading.Tasks;
-using Microsoft.Build.Locator;
+// Program.cs
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.MSBuild;
+using System.Text.Json;
 
-namespace ConfigScanner
+var workspace = MSBuildWorkspace.Create();
+Console.WriteLine("Loading solution...");
+var solution = await workspace.OpenSolutionAsync("YourSolution.sln");
+
+var allConfigAccesses = new List<ConfigAccess>();
+
+foreach (var project in solution.Projects)
 {
-    class ConfigHit
+    foreach (var doc in project.Documents)
     {
-        public string Project;
-        public string File;
-        public int Line;
-        public string Category;     // IConfiguration, Options, Provider, etc.
-        public string Method;       // e.g. GetValue, Value, .Bind
-        public string Key;          // config key or null
-    }
+        var tree = await doc.GetSyntaxTreeAsync();
+        var model = await doc.GetSemanticModelAsync();
+        var root = await tree.GetRootAsync();
 
-    class Program
-    {
-        static async Task Main(string[] args)
+        var invocations = root.DescendantNodes().OfType<InvocationExpressionSyntax>();
+        var indexers = root.DescendantNodes().OfType<ElementAccessExpressionSyntax>();
+
+        foreach (var invocation in invocations)
         {
-            if (args.Length == 0)
+            if (invocation.Expression is MemberAccessExpressionSyntax memberAccess)
             {
-                Console.Error.WriteLine("Usage: dotnet run -- <path-to-solution-folder>");
-                return;
-            }
-
-            MSBuildLocator.RegisterDefaults();
-            using var workspace = MSBuildWorkspace.Create();
-            var solutions = Directory.GetFiles(args[0], "*.sln", SearchOption.AllDirectories);
-            var results = new List<ConfigHit>();
-
-            foreach (var sln in solutions)
-            {
-                Console.WriteLine($"Loading solution {Path.GetFileName(sln)}...");
-                var solution = await workspace.OpenSolutionAsync(sln);
-
-                foreach (var project in solution.Projects)
-                foreach (var doc in project.Documents)
+                var method = memberAccess.Name.Identifier.Text;
+                if (method == "GetSection" || method == "GetValue" || method == "Bind")
                 {
-                    var root = await doc.GetSyntaxRootAsync();
-                    if (root == null) continue;
-
-                    var model = await doc.GetSemanticModelAsync();
-                    if (model == null) continue;
-
-                    ScanElementAccess(root, model, project.Name, doc.FilePath, results);
-                    ScanInvocations(root, model, project.Name, doc.FilePath, results);
-                    ScanMemberAccess(root, model, project.Name, doc.FilePath, results);
-                    ScanOptionsUsage(root, model, project.Name, doc.FilePath, results);
-                    ScanProviderRegistrations(root, model, project.Name, doc.FilePath, results);
-                }
-            }
-
-            // Output CSV
-            using var writer = new StreamWriter("config-discovery.csv");
-            writer.WriteLine("Project,File,Line,Category,Method,Key");
-            foreach (var hit in results)
-                writer.WriteLine($"{hit.Project},{hit.File},{hit.Line},{hit.Category},{hit.Method},{hit.Key}");
-
-            Console.WriteLine("Scan complete. See config-discovery.csv");
-        }
-
-        static void ScanElementAccess(SyntaxNode root, SemanticModel model, string project, string file, List<ConfigHit> results)
-        {
-            var elements = root.DescendantNodes().OfType<ElementAccessExpressionSyntax>();
-            foreach (var ea in elements)
-            {
-                var type = model.GetTypeInfo(ea.Expression).Type;
-                if (!Implements(model, type, "Microsoft.Extensions.Configuration.IConfiguration"))
-                    continue;
-
-                var key = GetStringConstant(ea.ArgumentList.Arguments[0].Expression, model);
-                results.Add(new ConfigHit {
-                    Project = project,
-                    File = file,
-                    Line = ea.GetLocation().GetLineSpan().StartLinePosition.Line + 1,
-                    Category = "IConfiguration",
-                    Method = "Indexer",
-                    Key = key
-                });
-            }
-        }
-
-        static void ScanInvocations(SyntaxNode root, SemanticModel model, string project, string file, List<ConfigHit> results)
-        {
-            var calls = root.DescendantNodes().OfType<InvocationExpressionSyntax>();
-            foreach (var inv in calls)
-            {
-                if (!(inv.Expression is MemberAccessExpressionSyntax ma)) continue;
-
-                var recvType = model.GetTypeInfo(ma.Expression).Type;
-                // IConfiguration calls
-                if (Implements(model, recvType, "Microsoft.Extensions.Configuration.IConfiguration"))
-                {
-                    var method = ma.Name.Identifier.Text;
-                    var key = inv.ArgumentList.Arguments.Count > 0
-                        ? GetStringConstant(inv.ArgumentList.Arguments[0].Expression, model)
-                        : null;
-
-                    results.Add(new ConfigHit {
-                        Project = project,
-                        File = file,
-                        Line = inv.GetLocation().GetLineSpan().StartLinePosition.Line + 1,
-                        Category = "IConfiguration",
-                        Method = method,
-                        Key = key
-                    });
-                    continue;
-                }
-            }
-        }
-
-        static void ScanMemberAccess(SyntaxNode root, SemanticModel model, string project, string file, List<ConfigHit> results)
-        {
-            var members = root.DescendantNodes().OfType<MemberAccessExpressionSyntax>();
-            foreach (var ma in members)
-            {
-                var recvType = model.GetTypeInfo(ma.Expression).Type;
-                if (Implements(model, recvType, "Microsoft.Extensions.Options.IOptions`1") ||
-                    Implements(model, recvType, "Microsoft.Extensions.Options.IOptionsMonitor`1") )
-                {
-                    var prop = ma.Name.Identifier.Text;
-                    if (prop == "Value" || prop == "CurrentValue")
+                    var keys = GetChainedSections(invocation, model);
+                    allConfigAccesses.Add(new ConfigAccess
                     {
-                        results.Add(new ConfigHit {
-                            Project = project,
-                            File = file,
-                            Line = ma.GetLocation().GetLineSpan().StartLinePosition.Line + 1,
-                            Category = "Options",
-                            Method = prop,
-                            Key = null
-                        });
-                    }
-                }
-            }
-        }
-
-        static void ScanOptionsUsage(SyntaxNode root, SemanticModel model, string project, string file, List<ConfigHit> results)
-        {
-            // invocations on IOptions*, e.g. Get("name")
-            var calls = root.DescendantNodes().OfType<InvocationExpressionSyntax>();
-            foreach (var inv in calls)
-            {
-                if (!(inv.Expression is MemberAccessExpressionSyntax ma)) continue;
-                var recvType = model.GetTypeInfo(ma.Expression).Type;
-                if (Implements(model, recvType, "Microsoft.Extensions.Options.IOptionsMonitor`1"))
-                {
-                    var method = ma.Name.Identifier.Text;
-                    var key = inv.ArgumentList.Arguments.Count > 0
-                        ? GetStringConstant(inv.ArgumentList.Arguments[0].Expression, model)
-                        : null;
-
-                    results.Add(new ConfigHit {
-                        Project = project,
-                        File = file,
-                        Line = inv.GetLocation().GetLineSpan().StartLinePosition.Line + 1,
-                        Category = "Options",
-                        Method = method,
-                        Key = key
+                        Keys = keys,
+                        AccessType = method,
+                        File = doc.FilePath,
+                        Line = invocation.GetLocation().GetLineSpan().StartLinePosition.Line + 1
                     });
                 }
             }
         }
 
-        static void ScanProviderRegistrations(SyntaxNode root, SemanticModel model, string project, string file, List<ConfigHit> results)
+        foreach (var indexer in indexers)
         {
-            var calls = root.DescendantNodes().OfType<InvocationExpressionSyntax>();
-            foreach (var inv in calls)
+            if (indexer.Expression is IdentifierNameSyntax ident &&
+                (ident.Identifier.Text == "Configuration" || ident.Identifier.Text == "config"))
             {
-                if (!(inv.Expression is MemberAccessExpressionSyntax ma)) continue;
-                var recvType = model.GetTypeInfo(ma.Expression).Type;
-                if (recvType?.ToDisplayString().Contains("ConfigurationBuilder") == true)
+                var arg = indexer.ArgumentList.Arguments.FirstOrDefault()?.Expression;
+                if (arg is LiteralExpressionSyntax literal)
                 {
-                    var provider = ma.Name.Identifier.Text;
-                    results.Add(new ConfigHit {
-                        Project = project,
-                        File = file,
-                        Line = inv.GetLocation().GetLineSpan().StartLinePosition.Line + 1,
-                        Category = "Provider",
-                        Method = provider,
-                        Key = null
+                    allConfigAccesses.Add(new ConfigAccess
+                    {
+                        Keys = new List<string> { literal.Token.ValueText },
+                        AccessType = "Indexer",
+                        File = doc.FilePath,
+                        Line = indexer.GetLocation().GetLineSpan().StartLinePosition.Line + 1
                     });
                 }
             }
-        }
-
-        static bool Implements(SemanticModel model, ITypeSymbol type, string iface)
-        {
-            if (type == null) return false;
-            var all = new[] { type }.Concat(type.AllInterfaces);
-            return all.Any(i => i.OriginalDefinition.ToDisplayString().StartsWith(iface));
-        }
-
-        static string GetStringConstant(ExpressionSyntax expr, SemanticModel model)
-        {
-            if (expr is LiteralExpressionSyntax lit && lit.IsKind(SyntaxKind.StringLiteralExpression))
-                return lit.Token.ValueText;
-
-            var constVal = model.GetConstantValue(expr);
-            if (constVal.HasValue && constVal.Value is string s)
-                return s;
-
-            return null;
         }
     }
+}
+
+File.WriteAllText("config-accesses.json", JsonSerializer.Serialize(allConfigAccesses, new JsonSerializerOptions
+{
+    WriteIndented = true
+}));
+
+Console.WriteLine("Done. Results written to config-accesses.json");
+
+// Helper types and methods
+record ConfigAccess
+{
+    public List<string> Keys { get; set; } = new();
+    public string AccessType { get; set; } = "Unknown";
+    public string File { get; set; } = "";
+    public int Line { get; set; }
+}
+
+List<string> GetChainedSections(ExpressionSyntax expr, SemanticModel model)
+{
+    var keys = new List<string>();
+
+    while (expr is InvocationExpressionSyntax invocation)
+    {
+        if (invocation.Expression is MemberAccessExpressionSyntax memberAccess &&
+            memberAccess.Name.Identifier.Text == "GetSection")
+        {
+            var arg = invocation.ArgumentList.Arguments.FirstOrDefault()?.Expression;
+            if (arg is LiteralExpressionSyntax literal)
+            {
+                keys.Insert(0, literal.Token.ValueText);
+            }
+            expr = memberAccess.Expression;
+        }
+        else
+        {
+            break;
+        }
+    }
+
+    return keys;
 }
