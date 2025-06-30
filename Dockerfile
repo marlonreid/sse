@@ -1,104 +1,99 @@
-// Program.cs
-using Microsoft.CodeAnalysis;
-using Microsoft.CodeAnalysis.CSharp;
-using Microsoft.CodeAnalysis.CSharp.Syntax;
-using Microsoft.CodeAnalysis.MSBuild;
-using System.Text.Json;
+<#
+.SYNOPSIS
+  Ensure a Key Vault secret matches a given local value.
 
-var workspace = MSBuildWorkspace.Create();
-Console.WriteLine("Loading solution...");
-var solution = await workspace.OpenSolutionAsync("YourSolution.sln");
+.PARAMETER VaultName
+  Name of the Key Vault.
 
-var allConfigAccesses = new List<ConfigAccess>();
+.PARAMETER SecretName
+  Name of the secret in Key Vault.
 
-foreach (var project in solution.Projects)
-{
-    foreach (var doc in project.Documents)
-    {
-        var tree = await doc.GetSyntaxTreeAsync();
-        var model = await doc.GetSemanticModelAsync();
-        var root = await tree.GetRootAsync();
+.PARAMETER DesiredValue
+  The plaintext value you want stored in Key Vault.
 
-        var invocations = root.DescendantNodes().OfType<InvocationExpressionSyntax>();
-        var indexers = root.DescendantNodes().OfType<ElementAccessExpressionSyntax>();
+.PARAMETER TenantId
+  (Optional) Tenant ID for Service Principal auth.
 
-        foreach (var invocation in invocations)
-        {
-            if (invocation.Expression is MemberAccessExpressionSyntax memberAccess)
-            {
-                var method = memberAccess.Name.Identifier.Text;
-                if (method == "GetSection" || method == "GetValue" || method == "Bind")
-                {
-                    var keys = GetChainedSections(invocation, model);
-                    allConfigAccesses.Add(new ConfigAccess
-                    {
-                        Keys = keys,
-                        AccessType = method,
-                        File = doc.FilePath,
-                        Line = invocation.GetLocation().GetLineSpan().StartLinePosition.Line + 1
-                    });
-                }
-            }
-        }
+.PARAMETER AppId
+  (Optional) Service Principal App ID.
 
-        foreach (var indexer in indexers)
-        {
-            if (indexer.Expression is IdentifierNameSyntax ident &&
-                (ident.Identifier.Text == "Configuration" || ident.Identifier.Text == "config"))
-            {
-                var arg = indexer.ArgumentList.Arguments.FirstOrDefault()?.Expression;
-                if (arg is LiteralExpressionSyntax literal)
-                {
-                    allConfigAccesses.Add(new ConfigAccess
-                    {
-                        Keys = new List<string> { literal.Token.ValueText },
-                        AccessType = "Indexer",
-                        File = doc.FilePath,
-                        Line = indexer.GetLocation().GetLineSpan().StartLinePosition.Line + 1
-                    });
-                }
-            }
-        }
-    }
+.PARAMETER AppSecret
+  (Optional) Service Principal secret.
+
+.EXAMPLE
+  # Interactive login
+  .\Sync-KvSecret.ps1 -VaultName "MyVault" -SecretName "MySecret" -DesiredValue "foo123"
+
+  # Service Principal login
+  .\Sync-KvSecret.ps1 -VaultName "MyVault" -SecretName "MySecret" `
+      -DesiredValue "foo123" -TenantId $env:AZ_TENANT_ID `
+      -AppId $env:AZ_APP_ID -AppSecret $env:AZ_APP_SECRET
+#>
+
+[CmdletBinding()]
+param(
+  [Parameter(Mandatory)]
+  [string]$VaultName,
+
+  [Parameter(Mandatory)]
+  [string]$SecretName,
+
+  [Parameter(Mandatory)]
+  [string]$DesiredValue,
+
+  [string]$TenantId,
+  [string]$AppId,
+  [string]$AppSecret
+)
+
+function Connect-Azure {
+  if ($TenantId -and $AppId -and $AppSecret) {
+    Write-Verbose "Authenticating with Service Principal..."
+    Connect-AzAccount `
+      -ServicePrincipal `
+      -Tenant $TenantId `
+      -ApplicationId $AppId `
+      -Credential (New-Object System.Management.Automation.PSCredential($AppId, (ConvertTo-SecureString $AppSecret -AsPlainText -Force)))
+  }
+  else {
+    Write-Verbose "Authenticating interactively..."
+    Connect-AzAccount -Tenant $TenantId
+  }
 }
 
-File.WriteAllText("config-accesses.json", JsonSerializer.Serialize(allConfigAccesses, new JsonSerializerOptions
-{
-    WriteIndented = true
-}));
+function Get-ExistingSecretValue {
+  param($vault, $name)
 
-Console.WriteLine("Done. Results written to config-accesses.json");
-
-// Helper types and methods
-record ConfigAccess
-{
-    public List<string> Keys { get; set; } = new();
-    public string AccessType { get; set; } = "Unknown";
-    public string File { get; set; } = "";
-    public int Line { get; set; }
+  try {
+    $secret = Get-AzKeyVaultSecret -VaultName $vault -Name $name -ErrorAction Stop
+    return $secret.SecretValueText
+  }
+  catch [Microsoft.Azure.Commands.KeyVault.Models.KeyVaultErrorException] {
+    # Secret not found
+    return $null
+  }
 }
 
-List<string> GetChainedSections(ExpressionSyntax expr, SemanticModel model)
-{
-    var keys = new List<string>();
+function Ensure-Secret {
+  param($vault, $name, $value)
 
-    while (expr is InvocationExpressionSyntax invocation)
-    {
-        if (invocation.Expression is MemberAccessExpressionSyntax memberAccess &&
-            memberAccess.Name.Identifier.Text == "GetSection")
-        {
-            var arg = invocation.ArgumentList.Arguments.FirstOrDefault()?.Expression;
-            if (arg is LiteralExpressionSyntax literal)
-            {
-                keys.Insert(0, literal.Token.ValueText);
-            }
-            expr = memberAccess.Expression;
-        }
-        else
-        {
-            break;
-        }
-    }
+  $current = Get-ExistingSecretValue -vault $vault -name $name
 
-    return keys;
+  if ($null -eq $current) {
+    Write-Host "Secret '$name' does not exist. Creating it..."
+    Set-AzKeyVaultSecret -VaultName $vault -Name $name -SecretValue (ConvertTo-SecureString $value -AsPlainText -Force) | Out-Null
+    Write-Host "✅ Created."
+  }
+  elseif ($current -ne $value) {
+    Write-Host "Secret '$name' exists but value differs. Updating..."
+    Set-AzKeyVaultSecret -VaultName $vault -Name $name -SecretValue (ConvertTo-SecureString $value -AsPlainText -Force) | Out-Null
+    Write-Host "✅ Updated."
+  }
+  else {
+    Write-Host "Secret '$name' already up‑to‑date. No action needed."
+  }
 }
+
+# --- Script start ---
+Connect-Azure
+Ensure-Secret -vault $VaultName -name $SecretName -value $DesiredValue
