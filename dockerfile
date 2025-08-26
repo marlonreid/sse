@@ -1,4 +1,43 @@
 import { useEffect, useState } from "react";
+import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { MsalProvider, useMsal, useIsAuthenticated } from "@azure/msal-react";
+import { pca, loginRequest } from "./msal";
+
+
+const API_BASE = "http://localhost:5000";
+
+
+function AuthRedirect() {
+// lightweight page for MSAL to land on after auth
+return (
+<div style={{padding:24}}>
+<h2>Signing you in…</h2>
+</div>
+);
+}
+
+
+function Catalog() {
+const { instance, accounts, inProgress } = useMsal();
+const isAuthed = useIsAuthenticated();
+const [apps, setApps] = useState([]);
+const [loading, setLoading] = useState(false);
+
+
+// Auto-redirect to Entra if not signed in (no sign-in screen)
+useEffect(() => {
+if (!isAuthed && inProgress === "none") {
+instance.loginRedirect(loginRequest);
+}
+}, [isAuthed, inProgress, instance]);
+
+
+useEffect(() => {
+const loadApps = async () => {
+setLoading(true);
+try {
+const account = accounts[0];
+const token = await instance.acquireTokenSilent({ ...loginRequest, account });
 const res = await fetch(`${API_BASE}/api/apps`, {
 headers: { Authorization: `Bearer ${token.accessToken}` }
 });
@@ -30,29 +69,4 @@ return (
 {app.launchUrl ? "Launch" : "No launch URL"}
 </button>
 </div>
-))}
-</div>
-</div>
-);
-}
-
-
-function Root() {
-return (
-<BrowserRouter>
-<Routes>
-<Route path="/auth" element={<AuthRedirect />} />
-<Route path="/*" element={<Catalog />} />
-</Routes>
-</BrowserRouter>
-);
-}
-
-
-export default function App() {
-return (
-<MsalProvider instance={pca}>
-<Root />
-</MsalProvider>
-);
 }
