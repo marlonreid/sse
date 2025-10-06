@@ -1,239 +1,93 @@
-ADR: Choose Identity Broker — Keycloak vs Duende IdentityServer
+Great—Confluent works well for a “tools-only” pod. Here’s the quickest, disposable way to run it in AKS, exec in, and use the Kafka CLIs against Event Hubs.
 
-Status: Proposed
-Date: 2025-09-19
-Context: We need an identity broker in front of Microsoft Entra ID (Azure AD). The broker will front our apps (OIDC/OAuth2), delegate authentication to Entra, and manage client registrations, flows, and session management. Two candidates: Keycloak and Duende IdentityServer.
+0) Prereqs
 
-Table of Contents
+az aks get-credentials … done
 
-Goals & Scope
+Your AKS egress can reach *.servicebus.windows.net:9093 (TLS 1.2)
 
-Options
+1) Create a namespace (optional)
+kubectl create ns tools
 
-Comparison Summary
+2) Launch a temporary pod (sleeping)
+kubectl run kafka-tools \
+  -n tools \
+  --image=confluentinc/cp-kafka:7.6.1 \
+  --restart=Never --command -- bash -lc "sleep infinity"
 
-Protocol & Feature Support
+kubectl wait -n tools --for=condition=Ready pod/kafka-tools --timeout=90s
 
-Licensing & Cost
+3) Put your Event Hubs client config in the pod
 
-Development Effort (est.)
+Create client.properties locally (example below), then copy it in:
 
-Infrastructure Effort (est.)
+kubectl cp ./client.properties tools/kafka-tools:/tmp/client.properties
 
-Risks & Mitigations
 
-Decision (Proposed)
+Example client.properties for Event Hubs (Kafka endpoint):
 
-Consequences
+bootstrap.servers=<namespace>.servicebus.windows.net:9093
+security.protocol=SASL_SSL
+sasl.mechanism=PLAIN
+sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required \
+  username="$ConnectionString" \
+  password="Endpoint=sb://<namespace>.servicebus.windows.net/;SharedAccessKeyName=<keyName>;SharedAccessKey=<key>";
+ssl.endpoint.identification.algorithm=https
+request.timeout.ms=60000
+session.timeout.ms=30000
 
-References
+4) Exec into the pod and use the tools
+kubectl exec -it -n tools kafka-tools -- bash
 
-1) Goals & Scope
 
-Use broker pattern: external authentication to Entra ID; issue tokens to our apps.
+Inside the shell you can run:
 
-Support OIDC/OAuth2 (and optionally SAML for some legacy SPs).
+# Check a consumer group’s lag
+kafka-consumer-groups \
+  --bootstrap-server <namespace>.servicebus.windows.net:9093 \
+  --command-config /tmp/client.properties \
+  --describe --group <your-group>
 
-Support many client apps (potentially hundreds+).
+# Ad-hoc read from the beginning
+kafka-console-consumer \
+  --bootstrap-server <namespace>.servicebus.windows.net:9093 \
+  --topic <eventhub-name> \
+  --consumer.config /tmp/client.properties \
+  --group debug-consumer --from-beginning
 
-Operate in Kubernetes with HA, monitoring, and sensible backup/DR.
+5) Clean up
+kubectl delete pod -n tools kafka-tools
+kubectl delete ns tools   # if you created it
 
-2) Options
+Alternative (YAML with mounted ConfigMap)
 
-Option A — Keycloak (open-source IdP) acting as an identity broker to Entra. 
-Keycloak
-+1
+If you’d rather not kubectl cp, create a ConfigMap and mount it:
 
-Option B — Duende IdentityServer (commercial .NET framework) used to build a custom OIDC provider that federates to Entra as an external provider. 
-Duende Software Docs
-+2
-Duende Software Docs
-+2
+kubectl -n tools create configmap eh-client --from-file=client.properties
 
-3) Comparison Summary
-Dimension	Keycloak	Duende IdentityServer
-Nature	Product with admin console & ready-to-run server	Framework/SDK you assemble into an auth server
-Protocols	OIDC, OAuth2.0, SAML 2.0; built-in brokering	OIDC/OAuth2.x; brokering via ASP.NET external providers (no native SAML)
-Entra as IdP	Built-in identity brokering to OIDC/SAML IdPs	Add Entra as external OIDC provider in ASP.NET
-Admin UI	Rich, built-in	Build your own (or adopt a third-party)
-Licensing	Apache 2.0 OSS; optional Red Hat build/support	Commercial subscription; $20k/yr Enterprise for unlimited clients
-Dev Effort	Lower (configure & theme)	Higher (build login/consent/admin, glue code)
-Infra Effort	Higher (Java, Postgres, clustering/caches)	Lower–Moderate (typical ASP.NET app footprint)
+cat <<'EOF' | kubectl apply -n tools -f -
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kafka-tools
+spec:
+  containers:
+  - name: tools
+    image: confluentinc/cp-kafka:7.6.1
+    command: ["bash","-lc","sleep infinity"]
+    volumeMounts:
+    - name: cfg
+      mountPath: /tmp
+  volumes:
+  - name: cfg
+    configMap:
+      name: eh-client
+EOF
 
-Citations: 
-duendesoftware.com
-+6
-Keycloak
-+6
-Keycloak
-+6
 
-4) Protocol & Feature Support
+Then:
 
-Keycloak
+kubectl exec -it -n tools kafka-tools -- bash
 
-OIDC & OAuth 2.0; SAML 2.0; identity brokering to external OIDC/SAML IdPs (fits Entra). 
-Keycloak
-+1
 
-Clustering & distributed caches (Infinispan) for HA; requires a database (commonly PostgreSQL). 
-Keycloak
-+1
-
-Duende IdentityServer
-
-Standards-compliant OIDC/OAuth 2.x framework; OpenID Certified; you compose flows in ASP.NET Core. 
-duendesoftware.com
-+1
-
-External providers (e.g., Entra) via standard ASP.NET authentication handlers; SAML would require separate components. 
-Duende Software Docs
-+1
-
-5) Licensing & Cost
-
-Keycloak: Apache 2.0 (no license fee). Optional enterprise support via Red Hat build of Keycloak. 
-GitHub
-+2
-Red Hat Customer Portal
-+2
-
-Duende IdentityServer: Annual subscription. Enterprise Edition includes unlimited client IDs at $20,000 USD/year (matches our expectation for “unlimited”). Lower tiers cap client IDs (e.g., Business = 15 clients, with $500 per extra client). 
-duendesoftware.com
-
-You noted we’ll need the $20k USD Duende license for unlimited client IDs — that aligns with Duende’s Enterprise pricing. 
-duendesoftware.com
-
-6) Development Effort (rough estimate, initial rollout)
-
-Assumptions: federation to Entra (OIDC), ~50–200 client apps over time, branded login/consent, basic self-service client registration for internal teams, audit logging, and CI/CD. Team skill: mixed; solid .NET capability available.
-
-Keycloak
-
-Config & federation to Entra: 16–40 hrs
-
-Realm/clients/scopes/policies setup: 40–80 hrs
-
-Themes (login/email/consent): 40–80 hrs
-
-User federation/group mapping (if needed): 16–40 hrs
-
-Automation (Terraform/Helm/CLI) & CI/CD: 40–80 hrs
-
-Observability (Prometheus/Grafana), backups, runbooks: 32–56 hrs
-
-Total dev/config effort: ~184–376 hrs (≈ 4.5–9.5 weeks for 1 FTE)
-
-Duende IdentityServer
-
-Project bootstrap & security hardening: 40–80 hrs
-
-External login (Entra) & brokering UX: 40–80 hrs
-
-Login/consent UI + session mgmt: 80–140 hrs
-
-Client & scope admin (custom portal or adopt 3rd-party): 80–160 hrs
-
-Token customization, claims mapping, refresh/offline tokens: 40–80 hrs
-
-Automation, CI/CD, observability, runbooks: 40–80 hrs
-
-Total dev effort: ~320–620 hrs (≈ 8–15.5 weeks for 1 FTE)
-
-Rationale: Keycloak ships a production-ready server and admin UI; most work is configuration & theming. Duende is a framework—powerful, but you build/admin much of the surface yourself. 
-Duende Software Docs
-
-7) Infrastructure Effort (rough estimate, initial rollout)
-
-Keycloak
-
-Kubernetes deployment (HA), Postgres provisioning, secrets/keystores, ingress, horizontal scaling, Infinispan caches tuning, backups/DR: ~80–140 hrs
-
-Ongoing ops (patch cadence, realm migrations, perf tuning): 2–4 days/quarter
-
-References: DB dependency, clustering/caches. 
-Keycloak
-+1
-
-Duende IdentityServer
-
-Package as ASP.NET Core service; stateless deployment; choose backing store (for config/operational data) as needed; ingress, scaling, cert rotation: ~40–80 hrs
-
-Ongoing ops: 1–2 days/quarter
-
-References: It’s “run like any ASP.NET app”; infra tends to be lighter than Keycloak’s JVM + cache cluster. 
-Duende Software Docs
-
-These are conservative ranges; parallelizing work shortens calendar time.
-
-8) Risks & Mitigations
-
-Client scale with Duende: licensing must remain at Enterprise to avoid per-client creep. Mitigation: lock in Enterprise tier budgeting. 
-duendesoftware.com
-
-SAML needs: Keycloak has native SAML; Duende would require additional components. Mitigation: confirm SAML roadmap; if SAML is required, Keycloak reduces scope risk. 
-Keycloak
-
-Operational complexity (Keycloak): clustering/cache tuning and DB management add ops overhead. Mitigation: reference architectures and Red Hat build if support SLAs are needed. 
-Keycloak
-+2
-Red Hat Developer
-+2
-
-Customization depth (Duende): higher upfront engineering. Mitigation: phased rollout; reuse company UI libraries; consider 3rd-party admin UI if acceptable. 
-Duende Software Docs
-
-9) Decision (Proposed)
-
-Choose Keycloak as the identity broker in front of Entra ID.
-
-Why:
-
-Zero license fee (unless we opt into Red Hat support), versus $20k/yr for Duende at our client scale. 
-duendesoftware.com
-+1
-
-Faster time-to-value due to built-in admin, flows, and SAML support. 
-Keycloak
-
-Well-trodden Entra brokering path. 
-Keycloak
-
-When to revisit: If we need deep, bespoke protocol behaviors and programmatic control that outstrip Keycloak’s SPIs/themes—or we want a purely .NET stack with minimal Java ops—Duende IdentityServer becomes attractive despite the license cost. 
-Duende Software Docs
-
-10) Consequences
-
-Pros (Keycloak): lower TCO, quicker rollout, SAML covered, mature admin features.
-
-Cons (Keycloak): more intricate ops (JVM, Postgres, cache clustering), upgrade hygiene needed.
-
-Pros (Duende): maximal flexibility in .NET; slim runtime; easy to integrate in existing ASP.NET ecosystem.
-
-Cons (Duende): license cost at our scale; higher initial dev; SAML requires add-ons.
-
-11) References
-
-Keycloak features & brokering (OIDC/OAuth2/SAML): 
-Keycloak
-+1
-
-Keycloak storage & HA notes (Postgres, caches/Infinispan): 
-Keycloak
-+2
-Keycloak
-+2
-
-Red Hat build of Keycloak (commercial support): 
-Red Hat Customer Portal
-+1
-
-Duende IdentityServer docs & positioning (framework): 
-Duende Software Docs
-
-Duende external IdPs (Entra as external provider): 
-Duende Software Docs
-+1
-
-Duende pricing (Enterprise $20k/yr, unlimited clients): 
-duendesoftware.com
+That’s it—you’ve got a disposable Confluent CLI pod in AKS to debug Event Hubs via Kafka. If you want, tell me your Event Hub partition count and consumer group.id and I’ll give you the exact commands to verify assignment and lag.
